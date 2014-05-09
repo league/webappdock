@@ -1,0 +1,244 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+# dockerapp • Deploy and manage web applications as docker containers
+# Copyright ©2014 Christopher League <league@contrapunctus.net>
+
+import argparse
+import errno
+import httplib
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+APT_DEPENDS = ['git', 'nginx']
+APT_INSTALL = 'apt-get install -y'
+DOCKERFILE = 'Dockerfile'
+GIT_HOOK = os.path.join('hooks', 'pre-receive')
+HTTP_PATH = '/ping'
+NUM_TRIES = 5
+RE_LABEL_COMMIT = re.compile(r'^(.*?)(-([0-9a-fA-F]+))?$')
+
+opts = None
+
+def main():
+    global opts
+    opts = main_args.parse_args()
+    if opts.dry_run:
+        opts.verbose = True
+    if opts.directory:
+        announce('cd ' + opts.directory)
+        os.chdir(opts.directory)
+    opts.func()
+
+def config_cmd():
+    'ensure all dependencies are installed and ready♯'
+    cmd = APT_INSTALL.split() + APT_DEPENDS
+    return dry_call(cmd)
+
+def init_cmd():
+    'create bare repository, ready for git push'
+    git_dir = opts.label + '.git'
+    cmd = 'git init --bare'.split()
+    cmd.append(git_dir)
+    dry_call(cmd)
+    hook = os.path.join(git_dir, GIT_HOOK)
+    dry_guard('symlink '+hook, force_symlink,
+              os.path.realpath(sys.argv[0]), hook)
+
+def run_cmd():
+    'build a docker image and run in a new container'
+    label, commit = label_commit_from_cwd(opts)
+    tag = '%s:%s' % (label,commit)
+    docker_build(os.getcwd(), tag)
+    container = docker_run(tag)
+    if opts.dry_run: return
+    r = try_repeatedly(is_container_responding, container, 80)
+    if r:
+        info = docker_inspect(container)
+        print container, info['Name']
+
+def deploy_cmd():
+    'expose a running container as a host site♯'
+    print opts
+
+def clean_cmd():
+    'stop and remove old containers and images♮'
+    print opts
+
+def list_cmd():
+    'show details about current and previous builds and deployments'
+    print opts
+
+
+
+def try_repeatedly(func, *args, **kwargs):
+    tries_left = NUM_TRIES
+    interval = 1
+    while tries_left > 0:
+        print '•', func.__doc__
+        try:
+            result = func(*args, **kwargs)
+            if result is not None:
+                print '•', result
+                return result
+        except SystemExit as e:
+            raise e
+        except BaseException as e:
+            print ' ', e
+        print '  waiting %d second%s' % (interval, '' if interval==1 else 's')
+        time.sleep(interval)
+        interval *= 2
+        tries_left -= 1
+    print '• giving up, sorry'
+
+def docker_inspect(container_id):
+    buf = subprocess.check_output(['docker', 'inspect', container_id])
+    return json.loads(buf)[0]
+
+def is_container_responding(container_id, port):
+    'Check for HTTP response from container'
+    info = docker_inspect(container_id)
+    if not info['State']['Running']:
+        sys.exit("Container no longer running")
+    ip = info['NetworkSettings']['IPAddress']
+    if ip:
+        return ensure_http_ok(ip, port, HTTP_PATH)
+
+def ensure_http_ok(host, port, path):
+    announce('GET http://%s:%d%s' % (host, port, path))
+    h = httplib.HTTPConnection(host, port, timeout=10)
+    h.request('GET', path)
+    r = h.getresponse()
+    announce(' → %s %s' % (r.status, r.reason))
+    return r.status == httplib.OK
+
+def docker_run(tag):
+    cmd = 'docker run -d'.split()
+    cmd.append(tag)
+    container = dry_call(cmd, call=subprocess.check_output)
+    if container:
+        container = container.rstrip()
+    elif not opts.dry_run:
+        exit(1)
+    return container
+
+def docker_build(dir, tag):
+    ensure_dockerfile(os.getcwd())
+    cmd = 'docker build -t'.split()
+    cmd.append(tag)
+    cmd.append('.')
+    err = dry_call(cmd)
+    if err and not opts.dry_run:
+        exit(err)
+
+def ensure_dockerfile(dir):
+    """Die unless there is a Dockerfile.
+In the future, this can be used to generate Dockerfile from a Makefile or
+similar."""
+    p = os.path.join(dir, DOCKERFILE)
+    if not os.path.isfile(p):
+        sys.exit('No %s found in %s' % (DOCKERFILE, dir))
+
+def label_commit_from_cwd(opts):
+    cwd = os.path.basename(os.getcwd())
+    m = RE_LABEL_COMMIT.match(cwd)
+    label = opts.label or m.group(1)
+    commit = opts.commit or m.group(3)
+    if not commit:
+        sys.exit('You must specify --commit, unless current directory is named as LABEL-COMMIT')
+    announce('Using label=[%s] commit=[%s]' % (label, commit))
+    return (label, commit)
+
+def dry_call(cmd, call=subprocess.call):
+    return dry_guard(' '.join(cmd), call, cmd)
+
+def dry_guard(mesg, f, *args, **kwargs):
+    announce(mesg)
+    if not opts.dry_run:
+        return f(*args, **kwargs)
+
+def announce(mesg):
+    if opts.verbose:
+        print '»', mesg
+
+def force_symlink(file1, file2):
+    try:
+        os.symlink(file1, file2)
+    except OSError, e:
+        if e.errno == errno.EEXIST:
+            os.remove(file2)
+            os.symlink(file1, file2)
+
+def hex_arg(value):
+    try:
+        int(value, 16)
+    except ValueError:
+        raise argparse.ArgumentTypeError('must be a hexadecimal string')
+    return value
+
+def make_cmd_parser(name, **kwargs):
+    "Create parser for sub-command, using its doc string for help text"
+    f = globals()[name + '_cmd']
+    if 'notes' in kwargs:
+        kwargs['epilog'] = format_footnotes(kwargs['notes'])
+        del kwargs['notes']
+    args = subparse.add_parser(
+        name, help=f.__doc__, description=f.__doc__,
+        parents=[common_args], **kwargs
+    )
+    args.set_defaults(func=f)
+    return args
+
+def format_footnotes(keys):
+    notes = []
+    for k in keys:
+        notes.append(u'  %c %s' % (k, footnotes[k]))
+    return '\n'.join(notes).encode('utf-8')
+
+
+
+footnotes = {
+    u'♯': 'requires root privilege',
+    u'♮': 'can do more if given root privilege',
+    u'♭': 'by default, parses current directory name as LABEL-COMMIT'
+    }
+
+main_args = argparse.ArgumentParser(
+    description='deploy and manage web applications as docker containers',
+    epilog=format_footnotes(u'♯♮')
+    )
+main_args.add_argument('-V', '--version', action='version',
+                       version='%(prog)s 0.1')
+
+subparse = main_args.add_subparsers(title='Commands')
+
+common_args = argparse.ArgumentParser(add_help=False)
+common_args.add_argument('-n', '--dry-run', action='store_true',
+                         help='perform a trial run with no changes made')
+common_args.add_argument('-v', '--verbose', action='store_true',
+                         help='increase verbosity about what is happening')
+common_args.add_argument('-C', '--directory', metavar='DIR',
+                         help='Change to DIR before doing anything')
+
+config_args = make_cmd_parser('config')
+
+init_args = make_cmd_parser('init')
+init_args.add_argument('label', metavar='LABEL',
+                       help='name to use for the project repository')
+
+run_args = make_cmd_parser('run', notes=u'♭')
+run_args.add_argument('-l', '--label', metavar='LABEL',
+                      help='name to use for this project♭')
+run_args.add_argument('-c', '--commit', metavar='COMMIT', type=hex_arg,
+                      help='commit ID for this version♭')
+
+deploy_args = make_cmd_parser('deploy')
+
+clean_args = make_cmd_parser('clean')
+
+list_args = make_cmd_parser('list')
+
+if __name__ == '__main__': main()
