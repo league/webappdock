@@ -14,6 +14,7 @@ import math
 import os
 import re
 import shelve
+import shutil
 import subprocess
 import sys
 import time
@@ -381,10 +382,12 @@ def clean_cmd():
                               os.path.join(SITES_AVAILABLE, f))
 
     print '• Removing stopped unavailable containers...'
-    nr = [c.id for c in cs if not c.is_running() and not c.is_available()]
-    for c in nr:
-        dry_call(DOCKER_RM + [c])
-        dry_guard('forget '+c, forget_container, c)
+    for c in cs:
+        if not c.is_running() and not c.is_available():
+            dry_call(DOCKER_RM + [c.id])
+            dry_guard('forget '+c.id, forget_container, c.id)
+            if c.ephemeral:
+                dry_guard('rm -r '+c.dir, shutil.rmtree, c.dir)
 
 clean_args = make_cmd_parser('clean')
 
