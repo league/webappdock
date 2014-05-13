@@ -18,9 +18,9 @@ int main(int argc, char** argv)
   char *dir = realpath(dirname(argv[0]), NULL);
   char buf[strlen(dir)+32];
   strcpy(buf, dir);
-  strcat(buf, "/web-app-dock.py");
+  strcat(buf, "/webappdock.py");
   printf("exec %s\n", buf);
-  execl(buf, buf, "deploy", "-v", "-c", argv[1], (char*)NULL);
-  printf("Error: did not exec");
+  execl(buf, buf, "deploy", "-v", "-c", argv[1], "--clean", (char*)NULL);
+  printf("Error: did not exec\n");
   return 1;
 }

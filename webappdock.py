@@ -6,6 +6,7 @@
 from contextlib import closing
 from datetime import datetime
 import argparse
+import doctest
 import errno
 import httplib
 import json
@@ -16,7 +17,7 @@ import shelve
 import subprocess
 import sys
 import time
-import doctest
+import traceback
 
 ABBREV_COMMIT = 5
 ABBREV_ID = 12
@@ -24,8 +25,14 @@ APT_DEPENDS = ['git', 'nginx', 'make', 'gcc']
 APT_INSTALL = 'apt-get install -y'
 CONTAINER_DB = os.path.join(os.environ['HOME'], '.dockerapp.db')
 DOCKERFILE = 'Dockerfile'
+DOCKER_BUILD_TAG = 'docker build -t'.split()
+DOCKER_INSPECT = 'docker inspect'.split()
+DOCKER_RM = 'docker rm'.split()
+DOCKER_RUN_DETACH = 'docker run -d'.split()
+DOCKER_STOP = 'docker stop'.split()
 ETC_NGINX = '/etc/nginx'
 GIT_HOOK = os.path.join('hooks', 'pre-receive')
+GIT_INIT_BARE = 'git init --bare'.split()
 HTTP_PATH = '/ping'
 HTTP_PORT = 'HTTP_PORT'
 NUM_TRIES = 5
@@ -36,9 +43,11 @@ SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 SITES_AVAILABLE = os.path.join(ETC_NGINX, 'sites-available')
 SITES_AVAIL_REL = os.path.join('..', 'sites-available')
 SITES_ENABLED = os.path.join(ETC_NGINX, 'sites-enabled')
+SITE_DATE_FMT = '%Y%m%d'
+SITE_TIME_FMT = '%H%M'
 UNUSABLE_PORTS = [22, 25]
 
-opts = None
+opts = argparse.Namespace()
 
 
 ### Main program and argument parsing
@@ -142,9 +151,7 @@ config_args = make_cmd_parser('config')
 def init_cmd():
     'create bare repository, ready for git push'
     git_dir = opts.label + '.git'
-    cmd = 'git init --bare'.split()
-    cmd.append(git_dir)
-    dry_call(cmd)
+    dry_call(GIT_INIT_BARE + [git_dir])
     hook = os.path.join(git_dir, GIT_HOOK)
     dry_guard('symlink '+hook, force_symlink,
               os.path.realpath(sys.argv[0]), hook)
@@ -154,9 +161,9 @@ init_args.add_argument('label', metavar='LABEL',
                        help='name to use for the project repository')
 
 
-### ‘run’ sub-command
+### ‘make’ sub-command
 
-def run_cmd():
+def make_cmd():
     'build a docker image and run in a new container'
     label, commit = label_commit_from_opts_or_cwd()
     tag = '%s:%s' % (label,commit)
@@ -166,21 +173,21 @@ def run_cmd():
     info = docker_inspect(id)
     port = opts.port or determine_port(info) or 80
     announce('Using port %d for HTTP' % port)
-    with closing(shelve.open(CONTAINER_DB)) as db:
-        db[id] = Container(id, label, commit, port).__dict__
+    c = Container(id, label, commit, port)
+    c.save()
     r = try_repeatedly(is_container_responding, id, port)
     if r:
         print id, info['Name']
         return id
 
-run_args = make_cmd_parser('run', notes=u'♭')
-run_args.add_argument('-l', '--label', metavar='LABEL',
+make_args = make_cmd_parser('make', notes=u'♭')
+make_args.add_argument('-l', '--label', metavar='LABEL',
                       help='name to use for this project♭')
-run_args.add_argument('-c', '--commit', metavar='COMMIT', type=hex_arg,
+make_args.add_argument('-c', '--commit', metavar='COMMIT', type=hex_arg,
                       help='commit ID for this version♭')
-run_args.add_argument('-p', '--port', type=int, metavar='PORT',
+make_args.add_argument('-p', '--port', type=int, metavar='PORT',
                       help='port to use for HTTP connection')
-run_args.add_argument('-e', '--ephemeral', action='store_true',
+make_args.add_argument('-e', '--ephemeral', action='store_true',
                       help='directory can be removed during clean')
 
 def label_commit_from_opts_or_cwd():
@@ -194,10 +201,7 @@ def label_commit_from_opts_or_cwd():
 
 def docker_build(dir, tag):
     ensure_dockerfile(os.getcwd())
-    cmd = 'docker build -t'.split()
-    cmd.append(tag)
-    cmd.append('.')
-    err = dry_call(cmd)
+    err = dry_call(DOCKER_BUILD_TAG + [tag, '.'])
     if err and not opts.dry_run:
         exit(err)
 
@@ -210,9 +214,8 @@ similar.'''
         sys.exit('No %s found in %s' % (DOCKERFILE, dir))
 
 def docker_run(tag):
-    cmd = 'docker run -d'.split()
-    cmd.append(tag)
-    container = dry_call(cmd, call=subprocess.check_output)
+    container = dry_call(DOCKER_RUN_DETACH + [tag],
+                         call=subprocess.check_output)
     if container:
         container = container.rstrip()
     elif not opts.dry_run:
@@ -251,39 +254,36 @@ def determine_port(info):
 
 def deploy_cmd():
     'expose a running container as a host site♯'
-    if opts.revert:
-        sys.exit('--revert not supported yet')
-    elif opts.container:
-        container, d = lookup_by_container_prefix(opts.container)
+    if opts.container:
+        c = get_container_where(lambda c: c.id.startswith(opts.container))
     else:
-        container, d = lookup_by_label_commit(opts.project or
-                                              os.path.basename(os.getcwd()))
+        p = opts.project or os.path.basename(os.getcwd())
+        c = get_container_where(lambda c: c.name() == p)
+    if not c.is_running():
+        old_id = c.id
+        c.id = docker_run(c.image())
+        r = try_repeatedly(is_container_responding, c.id, c.port)
+        if not r: sys.exit(1)
+        forget_container(old_id)
+        c.save()
     if os.geteuid() != 0:
         announce('Warning: ' + footnotes[u'♯'])
-    now = datetime.now()
-    info = docker_inspect(container)
-    filename = '%s-%s-%s-g%s-k%s' % \
-               (d['label'],
-                datetime.strftime(now, '%Y%m%d'),
-                datetime.strftime(now, '%H%M'),
-                d['commit'],
-                container[:ABBREV_ID])
+    filename = c.site_filename(datetime.now())
     avail = os.path.join(SITES_AVAILABLE, filename)
-    announce('Creating ' + avail)
-    with closing(shelve.open(CONTAINER_DB)) as db:
+    announce('writing ' + avail)
+    if not opts.dry_run:
         with open(avail, 'w') as outfile:
-            url = 'http://%s:%d' % (info['NetworkSettings']['IPAddress'],
-                                    db[container]['port'])
+            url = 'http://%s:%d' % (c.ip_address(), c.port)
             outfile.write(NGINX_PROXY % url)
     avail_rel = os.path.join(SITES_AVAIL_REL, filename)
     enabled = os.path.join(SITES_ENABLED, filename)
     for f in os.listdir(SITES_ENABLED):
-        if f.startswith(d['label']):
-            announce('Removing ' + f)
-            os.unlink(os.path.join(SITES_ENABLED, f))
-    announce('Linking ' + enabled)
-    os.symlink(avail_rel, enabled)
+        if f.startswith(c.label):
+            dry_guard('rm '+f, os.unlink, os.path.join(SITES_ENABLED, f))
+    dry_guard('symlink '+enabled, os.symlink, avail_rel, enabled)
     dry_call(['service', 'nginx', 'reload'])
+    if opts.clean:
+        clean_cmd()
 
 NGINX_PROXY = '''
 server {
@@ -300,16 +300,16 @@ server {
 
 deploy_args = make_cmd_parser('deploy')
 deploy_args.add_argument(
-    '-r', '--revert', metavar='N', type=int, nargs='?', const=1,
-    help='revert to Nth previous deploy of this project'
-)
-deploy_args.add_argument(
     '-c', '--container', metavar='ID', type=hex_arg,
-    help='revert to this container ID'
+    help='deploy this container ID'
 )
 deploy_args.add_argument(
     '-p', '--project', metavar='LABEL-COMMIT',
-    help='revert to given COMMIT of project LABEL'
+    help='deploy given COMMIT of project LABEL'
+)
+deploy_args.add_argument(
+    '--clean', action='store_true',
+    help='clean up containers after successful deploy'
 )
 
 
@@ -331,7 +331,7 @@ def receive_cmd():
     os.chdir(workdir)
     opts.label, opts.commit, opts.port = None, None, None
     opts.ephemeral = True
-    opts.container = run_cmd()
+    opts.container = make_cmd()
     if not opts.container: sys.exit(1)
     dry_call([os.path.join(SCRIPT_DIR, 'sudo-deploy'), opts.container])
 
@@ -349,7 +349,42 @@ Answer the commit hash for an update to master, if any.'''
 
 def clean_cmd():
     'stop and remove old containers and images♮'
-    print opts
+    # Grab all the containers and site files
+    es = list_containers_and_sites()
+    cs = set()                  # cs is unordered
+    apps = {}                   # contains deployments by app
+    for (c,d) in es:
+        cs.add(c)
+        if c.label not in apps:
+            apps[c.label] = []
+        if d:
+            apps[c.label].append(d)
+
+    print '• Stopping all but the most recently-deployed containers...'
+    for app,ds in apps.iteritems():
+        recent = [d.container.id for d in ds[-2:]]
+        for c in cs:
+            if c.label == app and c.is_running() and c.id not in recent:
+                dry_call(DOCKER_STOP + [c.id])
+                c.__getstate__() # clear info cache
+
+    if os.geteuid() != 0:
+        print '• Evicting very old deployments... skipped, need sudo!'
+    else:
+        print '• Evicting very old deployments...'
+        for app,ds in apps.iteritems():
+            for d in ds[:-7]:
+                if (not d.container.is_running() and # could also check age
+                    not d.container.is_enabled()):
+                    f = str(d)
+                    dry_guard('rm '+f, os.unlink,
+                              os.path.join(SITES_AVAILABLE, f))
+
+    print '• Removing stopped unavailable containers...'
+    nr = [c.id for c in cs if not c.is_running() and not c.is_available()]
+    for c in nr:
+        dry_call(DOCKER_RM + [c])
+        dry_guard('forget '+c, forget_container, c)
 
 clean_args = make_cmd_parser('clean')
 
@@ -358,30 +393,23 @@ clean_args = make_cmd_parser('clean')
 
 def list_cmd():
     'show details about previous builds and deployments'
-    with closing(shelve.open(CONTAINER_DB)) as db:
-        entries = list(db.iteritems())
+    entries = list_containers_and_sites()
+    name_width = max(len(c[0].name()) for c in entries)
+    enabled = os.listdir(SITES_ENABLED)
     print ' RUNNING'
     print '/ AVAILABLE'
     print '|/ ENABLED'
-    print '||/ PROJECT-COMMIT           CONTAINER    CREATED'
-    avails = os.listdir(SITES_AVAILABLE)
-    enableds = os.listdir(SITES_ENABLED)
-    for k,v in sorted(entries, key=lambda kv: (kv[1]['label'], kv[1]['created'])):
-        label = v['label']
-        commit = v['commit']
-        info = docker_inspect(k)
-        run = 'R' if info['State']['Running'] else ' '
-        prefix = k[:ABBREV_ID]
-        kre = re.compile('-k%s$' % prefix)
-        avail = 'A' if list_contains_match(avails, kre) else ' '
-        enabled = 'E' if list_contains_match(enableds, kre) else ' '
-        #ip = info['NetworkSettings']['IPAddress']
-        #if ip:
-        #    ip = '%s:%s' % (ip, v['port'])
-        name = info['Name']
-        created = reltime(v['created'])
-        print '%c%c%c %-24s %s %s' % \
-            (run, avail, enabled, label+'-'+commit, prefix, created)
+    print '||/ %-*s CONTAINER    TIMESTAMP' % (name_width, 'PROJECT')
+    for (cont,site) in entries:
+        print '%c%c%c %-*s %s %s' % \
+            ('R' if cont.is_running() else ' ',
+             'A' if site else ' ',
+             'E' if str(site) in enabled else ' ',
+             name_width,
+             cont.name(),
+             cont.abbrev_id(),
+             'Deployed ' + reltime(site.timestamp) if site else
+             '   Built ' + reltime(cont.created))
 
 list_args = make_cmd_parser('list')
 
@@ -399,6 +427,74 @@ test_args = make_cmd_parser('test')
 
 ### Persistent container and deployment info
 
+def get_container_by_id(id):
+    with closing(shelve.open(CONTAINER_DB)) as db:
+        return db[id]
+
+def forget_container(id):
+    with closing(shelve.open(CONTAINER_DB)) as db:
+        del db[id]
+
+def get_container_where(pred):
+    candidates = []
+    with closing(shelve.open(CONTAINER_DB)) as db:
+        for id in db:
+            c = db[id]
+            if pred(c):
+                candidates.append(c)
+    if len(candidates) == 1:
+        return candidates[0]
+    elif len(candidates) > 1:
+        sys.exit('Multiple containers matched.')
+    else:
+        sys.exit('No containers matched.')
+
+def list_containers():
+    with closing(shelve.open(CONTAINER_DB)) as db:
+        entries = list(db.itervalues())
+        entries.sort(key=lambda c: (c.label, c.created))
+        return entries
+
+def iter_containers_and_sites():
+    with closing(shelve.open(CONTAINER_DB)) as db:
+        for c in db.itervalues():
+            ds = list(c.iter_sites(SITES_AVAILABLE))
+            if ds:
+                for d in ds:
+                    yield (c,d)
+            else:
+                yield (c,None)
+
+def list_containers_and_sites():
+    entries = list(iter_containers_and_sites())
+    entries.sort(key=lambda x: (x[0].label, x[1].timestamp
+                                if x[1] else x[0].created))
+    return entries
+
+class Site(object):
+    def __init__(self, container, arg):
+        assert container
+        self.container = container
+        if isinstance(arg, datetime):
+            self.timestamp = arg
+        else: # should be a filename
+            label, ymd, hm, commit, id = arg.split('-')
+            self.timestamp = datetime(year   = int(ymd[:4]),
+                                      month  = int(ymd[4:6]),
+                                      day    = int(ymd[6:]),
+                                      hour   = int(hm[:2]),
+                                      minute = int(hm[2:]))
+            assert datetime.strftime(self.timestamp, SITE_DATE_FMT) == ymd
+            assert datetime.strftime(self.timestamp, SITE_TIME_FMT) == hm
+
+    def __repr__(self):
+        return '%s-%s-%s-g%s-k%s' % \
+            (self.container.label,
+             datetime.strftime(self.timestamp, SITE_DATE_FMT),
+             datetime.strftime(self.timestamp, SITE_TIME_FMT),
+             self.container.commit,
+             self.container.abbrev_id())
+
 class Container(object):
     def __init__(self, id=None, label=None, commit=None, port=None):
         assert id
@@ -412,6 +508,70 @@ class Container(object):
         self.dir = os.getcwd()
         self.ephemeral = opts.ephemeral
         self.created = datetime.now()
+        self._info_cache = None
+        self._sites_regex = None
+
+    def __getstate__(self):
+        '''Remove caches before pickling.
+        >>> opts.ephemeral = False
+        >>> c = Container('abc', 'web', '123', 80)
+        >>> c._info_cache = [7,8,9]
+        >>> import pickle
+        >>> k = pickle.loads(pickle.dumps(c))
+        >>> k._info_cache
+        '''
+        self._info_cache = None
+        self._sites_regex = None
+        return self.__dict__
+
+    def abbrev_id(self):
+        return self.id[:ABBREV_ID]
+
+    def name(self):
+        return '%s-%s' % (self.label, self.commit)
+
+    def save(self):
+        with closing(shelve.open(CONTAINER_DB)) as db:
+            db[self.id] = self
+
+    def site_filename(self, timestamp):
+        return str(Site(self, timestamp))
+
+    def ensure_info_cache(self):
+        if not hasattr(self, '_info_cache') or not self._info_cache:
+            self._info_cache = docker_inspect(self.id)
+
+    def is_running(self):
+        self.ensure_info_cache()
+        return self._info_cache['State']['Running']
+
+    def ip_address(self):
+        self.ensure_info_cache()
+        return self._info_cache['NetworkSettings']['IPAddress']
+
+    def image(self):
+        self.ensure_info_cache()
+        return self._info_cache['Image']
+
+    def ensure_sites_regex(self):
+        if not hasattr(self, '_sites_regex') or not self._sites_regex:
+            self._sites_regex = re.compile('-k%s$' % self.abbrev_id())
+
+    def is_site(self, dir):
+        self.ensure_sites_regex()
+        return list_contains_match(os.listdir(dir), self._sites_regex)
+
+    def is_available(self):
+        return self.is_site(SITES_AVAILABLE)
+
+    def is_enabled(self):
+        return self.is_site(SITES_ENABLED)
+
+    def iter_sites(self, dir):
+        self.ensure_sites_regex()
+        for f in os.listdir(dir):
+            if self._sites_regex.search(f):
+                yield Site(self, f)
 
 
 ### Utility functions
@@ -421,54 +581,15 @@ def list_contains_match(xs, regex):
 
     >>> r = re.compile(r'fo?o$')
     >>> list_contains_match(['goo'], r)
-    False
-    >>> list_contains_match(['goofo'], r)
-    True
+    >>> list_contains_match(['goo', 'goofo'], r)
+    'goofo'
     >>> list_contains_match(['goofoo'], r)
-    True
+    'goofoo'
     >>> list_contains_match(['foofa'], r)
-    False
     '''
     for x in xs:
         if regex.search(x):
-            return True
-    return False
-
-def lookup_by_label_commit(tag):
-    label, commit = label_commit_from(tag)
-    if not commit:
-        sys.exit('You must specify commit using --project, or use --container or --revert')
-    container = None
-    with closing(shelve.open(CONTAINER_DB)) as db:
-        candidates = []
-        for k in db:
-            d = db[k]
-            if d['label'] == label and d['commit'] == commit:
-                candidates.append(k)
-        if len(candidates) == 1:
-            return (candidates[0], db[candidates[0]])
-        elif len(candidates) > 1:
-            sys.exit('The tag "%s-%s" is ambiguous, could be one of:\n%s' %
-                     (label, commit, '\n'.join(candidates)))
-        else:
-            sys.exit('No containers matched "%s-%s"' % (label, commit))
-
-def lookup_by_container_prefix(prefix):
-    with closing(shelve.open(CONTAINER_DB)) as db:
-        try:
-            return (prefix, db[prefix])
-        except KeyError:
-            candidates = []
-            for k in db:
-                if k.startswith(prefix):
-                    candidates.append(k)
-            if len(candidates) == 1:
-                return (candidates[0], db[candidates[0]])
-            elif len(candidates) > 1:
-                sys.exit('The container prefix "%s" is ambiguous, could be one of:\n%s' %
-                         (prefix, '\n'.join(candidates)))
-            else:
-                sys.exit('No containers matched "%s"' % opts.container)
+            return x
 
 def env_list_lookup(env_list, key):
     '''In a list of strings of the form 'KEY=VALUE', look for KEY.
@@ -515,6 +636,8 @@ def try_repeatedly(func, *args, **kwargs):
             raise e
         except BaseException as e:
             print ' ', e
+            #traceback.print_exc()
+
         print '  waiting %d second%s' % (interval, '' if interval==1 else 's')
         time.sleep(interval)
         interval *= 2
@@ -522,7 +645,7 @@ def try_repeatedly(func, *args, **kwargs):
     print '• giving up, sorry'
 
 def docker_inspect(container_id):
-    buf = subprocess.check_output(['docker', 'inspect', container_id])
+    buf = subprocess.check_output(DOCKER_INSPECT + [container_id])
     return json.loads(buf)[0]
 
 def is_container_responding(container_id, port):
@@ -624,6 +747,7 @@ def dry_guard(mesg, f, *args, **kwargs):
         return f(*args, **kwargs)
 
 def announce(mesg):
+    global opts
     if opts.verbose:
         print '»', mesg
         sys.stdout.flush()
