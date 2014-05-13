@@ -395,6 +395,9 @@ clean_args = make_cmd_parser('clean')
 def list_cmd():
     'show details about previous builds and deployments'
     entries = list_containers_and_sites()
+    if not entries:
+        print 'Nothing to show'
+        sys.exit(0)
     name_width = max(len(c[0].name()) for c in entries)
     enabled = os.listdir(SITES_ENABLED)
     print 'Running/Available/Enabled'
@@ -638,10 +641,11 @@ def try_repeatedly(func, *args, **kwargs):
             print ' ', e
             #traceback.print_exc()
 
+        tries_left -= 1
+        if tries_left == 0: break
         print '  waiting %d second%s' % (interval, '' if interval==1 else 's')
         time.sleep(interval)
         interval *= 2
-        tries_left -= 1
     print '• giving up, sorry'
 
 def docker_inspect(container_id):
