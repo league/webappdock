@@ -161,22 +161,17 @@ def run_cmd():
     label, commit = label_commit_from_opts_or_cwd()
     tag = '%s:%s' % (label,commit)
     docker_build(os.getcwd(), tag)
-    container = docker_run(tag)
+    id = docker_run(tag)
     if opts.dry_run: return
-    info = docker_inspect(container)
+    info = docker_inspect(id)
     port = opts.port or determine_port(info) or 80
     announce('Using port %d for HTTP' % port)
     with closing(shelve.open(CONTAINER_DB)) as db:
-        db[container] = {'label': label,
-                         'commit': commit,
-                         'port': port,
-                         'dir': os.getcwd(),
-                         'ephemeral': opts.ephemeral,
-                         'created': datetime.now()}
-    r = try_repeatedly(is_container_responding, container, port)
+        db[id] = Container(id, label, commit, port).__dict__
+    r = try_repeatedly(is_container_responding, id, port)
     if r:
-        print container, info['Name']
-        return container
+        print id, info['Name']
+        return id
 
 run_args = make_cmd_parser('run', notes=u'♭')
 run_args.add_argument('-l', '--label', metavar='LABEL',
@@ -400,6 +395,23 @@ def test_cmd():
     doctest.testmod(verbose=opts.verbose)
 
 test_args = make_cmd_parser('test')
+
+
+### Persistent container and deployment info
+
+class Container(object):
+    def __init__(self, id=None, label=None, commit=None, port=None):
+        assert id
+        assert label
+        assert commit
+        assert port
+        self.id = id
+        self.label = label
+        self.commit = commit
+        self.port = port
+        self.dir = os.getcwd()
+        self.ephemeral = opts.ephemeral
+        self.created = datetime.now()
 
 
 ### Utility functions
