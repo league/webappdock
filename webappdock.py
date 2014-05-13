@@ -25,6 +25,7 @@ ABBREV_ID = 12
 APT_DEPENDS = ['git', 'nginx', 'make', 'gcc']
 APT_INSTALL = 'apt-get install -y'
 CONTAINER_DB = os.path.join(os.environ['HOME'], '.dockerapp.db')
+DEPLOY_SUBDIR = '.deploy'
 DOCKERFILE = 'Dockerfile'
 DOCKER_BUILD_TAG = 'docker build -t'.split()
 DOCKER_INSPECT = 'docker inspect'.split()
@@ -46,6 +47,7 @@ SITES_AVAIL_REL = os.path.join('..', 'sites-available')
 SITES_ENABLED = os.path.join(ETC_NGINX, 'sites-enabled')
 SITE_DATE_FMT = '%Y%m%d'
 SITE_TIME_FMT = '%H%M'
+SUDO_DEPLOY = 'sudo-deploy'
 UNUSABLE_PORTS = [22, 25]
 
 opts = argparse.Namespace()
@@ -166,7 +168,7 @@ def make_cmd():
     'build a docker image and run in a new container'
     label, commit = label_commit_from_opts_or_cwd()
     tag = '%s:%s' % (label,commit)
-    docker_build(os.getcwd(), tag)
+    docker_build(tag)
     id = docker_run(tag)
     if opts.dry_run: return
     info = docker_inspect(id)
@@ -198,11 +200,14 @@ def label_commit_from_opts_or_cwd():
     announce('Using label=[%s] commit=[%s]' % (label, commit))
     return (label, commit)
 
-def docker_build(dir, tag):
-    ensure_dockerfile(os.getcwd())
-    err = dry_call(DOCKER_BUILD_TAG + [tag, '.'])
-    if err and not opts.dry_run:
-        exit(err)
+def docker_build(tag):
+    with save_cwd() as cwd:
+        if os.path.exists(DEPLOY_SUBDIR):
+            os.chdir(DEPLOY_SUBDIR)
+        ensure_dockerfile('.')
+        err = dry_call(DOCKER_BUILD_TAG + [tag, '.'])
+        if err and not opts.dry_run:
+            exit(err)
 
 def ensure_dockerfile(dir):
     '''Die unless there is a Dockerfile.
@@ -332,7 +337,7 @@ def receive_cmd():
     opts.ephemeral = True
     opts.container = make_cmd()
     if not opts.container: sys.exit(1)
-    dry_call([os.path.join(SCRIPT_DIR, 'sudo-deploy'), opts.container])
+    dry_call([os.path.join(SCRIPT_DIR, SUDO_DEPLOY), opts.container])
 
 def git_master_commit():
     '''Parse the standard input for a git receive hook.
@@ -578,6 +583,12 @@ class Container(object):
 
 
 ### Utility functions
+
+class save_cwd(object):
+    def __enter__(self):
+        self.prev = os.getcwd()
+    def __exit__(self, type, value, traceback):
+        os.chdir(self.prev)
 
 def list_contains_match(xs, regex):
     '''Answer True if list XS contains a string matching REGEX.
