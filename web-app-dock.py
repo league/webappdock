@@ -20,7 +20,7 @@ import doctest
 
 ABBREV_COMMIT = 5
 ABBREV_ID = 12
-APT_DEPENDS = ['git', 'nginx']
+APT_DEPENDS = ['git', 'nginx', 'make', 'gcc']
 APT_INSTALL = 'apt-get install -y'
 CONTAINER_DB = os.path.join(os.environ['HOME'], '.dockerapp.db')
 DOCKERFILE = 'Dockerfile'
@@ -32,6 +32,7 @@ NUM_TRIES = 5
 REF_MASTER = 'refs/heads/master'
 RE_LABEL_COMMIT = re.compile(r'^(.*?)(-([0-9a-fA-F]+))?$')
 RE_PORT = re.compile(r'^([0-9]+)/tcp')
+SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 SITES_AVAILABLE = os.path.join(ETC_NGINX, 'sites-available')
 SITES_AVAIL_REL = os.path.join('..', 'sites-available')
 SITES_ENABLED = os.path.join(ETC_NGINX, 'sites-enabled')
@@ -130,7 +131,8 @@ common_args.add_argument('-C', '--directory', metavar='DIR',
 def config_cmd():
     'ensure all dependencies are installed and ready♯'
     cmd = APT_INSTALL.split() + APT_DEPENDS
-    return dry_call(cmd)
+    dry_call(cmd)
+    dry_call(['make'])
 
 config_args = make_cmd_parser('config')
 
@@ -169,6 +171,7 @@ def run_cmd():
                          'commit': commit,
                          'port': port,
                          'dir': os.getcwd(),
+                         'ephemeral': opts.ephemeral,
                          'created': datetime.now()}
     r = try_repeatedly(is_container_responding, container, port)
     if r:
@@ -182,6 +185,8 @@ run_args.add_argument('-c', '--commit', metavar='COMMIT', type=hex_arg,
                       help='commit ID for this version♭')
 run_args.add_argument('-p', '--port', type=int, metavar='PORT',
                       help='port to use for HTTP connection')
+run_args.add_argument('-e', '--ephemeral', action='store_true',
+                      help='directory can be removed during clean')
 
 def label_commit_from_opts_or_cwd():
     label, commit = label_commit_from(base_cwd())
@@ -283,7 +288,7 @@ def deploy_cmd():
             os.unlink(os.path.join(SITES_ENABLED, f))
     announce('Linking ' + enabled)
     os.symlink(avail_rel, enabled)
-    dry_call(['service', 'nginx', 'reload'], call=subprocess.check_call)
+    dry_call(['service', 'nginx', 'reload'])
 
 NGINX_PROXY = '''
 server {
@@ -327,16 +332,13 @@ def receive_cmd():
     announce('Checking out %s' % workdir)
     if not os.path.isdir(workdir): os.mkdir(workdir)
     dry_call('git archive "%s" | tar -x -C "%s"' % (commit, workdir),
-             call=subprocess.check_call,
              shell=True)
     os.chdir(workdir)
     opts.label, opts.commit, opts.port = None, None, None
+    opts.ephemeral = True
     opts.container = run_cmd()
     if not opts.container: sys.exit(1)
-    opts.revert, opts.project = None, None
-    deploy_cmd()
-    print "WORKED but we're returning error"
-    sys.exit(2)
+    dry_call([os.path.join(SCRIPT_DIR, 'sudo-deploy'), opts.container])
 
 def git_master_commit():
     '''Parse the standard input for a git receive hook.
@@ -366,7 +368,7 @@ def list_cmd():
     print ' RUNNING'
     print '/ AVAILABLE'
     print '|/ ENABLED'
-    print '||/ PROJECT-COMMIT           CONTAINER    IP ADDRESS           CREATED'
+    print '||/ PROJECT-COMMIT           CONTAINER    CREATED'
     avails = os.listdir(SITES_AVAILABLE)
     enableds = os.listdir(SITES_ENABLED)
     for k,v in sorted(entries, key=lambda kv: (kv[1]['label'], kv[1]['created'])):
@@ -378,13 +380,13 @@ def list_cmd():
         kre = re.compile('-k%s$' % prefix)
         avail = 'A' if list_contains_match(avails, kre) else ' '
         enabled = 'E' if list_contains_match(enableds, kre) else ' '
-        ip = info['NetworkSettings']['IPAddress']
-        if ip:
-            ip = '%s:%s' % (ip, v['port'])
+        #ip = info['NetworkSettings']['IPAddress']
+        #if ip:
+        #    ip = '%s:%s' % (ip, v['port'])
         name = info['Name']
         created = reltime(v['created'])
-        print '%c%c%c %-24s %s %-20s %s' % \
-            (run, avail, enabled, label+'-'+commit, prefix, ip, created)
+        print '%c%c%c %-24s %s %s' % \
+            (run, avail, enabled, label+'-'+commit, prefix, created)
 
 list_args = make_cmd_parser('list')
 
@@ -575,7 +577,7 @@ def label_commit_from(name):
     m = RE_LABEL_COMMIT.match(name)
     return (m.group(1), m.group(3))
 
-def dry_call(cmd, call=subprocess.call, **kwargs):
+def dry_call(cmd, call=subprocess.check_call, **kwargs):
     '''Run the list CMD using subprocess function CALL.
 
     >>> opts.dry_run, opts.verbose = True, True
