@@ -84,9 +84,7 @@ def make_cmd_parser(name, **kwargs):
     return args
 
 def format_footnotes(keys):
-    notes = []
-    for k in keys:
-        notes.append(u'  %c %s' % (k, footnotes[k]))
+    notes = [u'  %c %s' % (k, footnotes[k]) for k in keys]
     return '\n'.join(notes).encode('utf-8')
 
 def hex_arg(value):
@@ -399,10 +397,9 @@ def list_cmd():
     entries = list_containers_and_sites()
     name_width = max(len(c[0].name()) for c in entries)
     enabled = os.listdir(SITES_ENABLED)
-    print ' RUNNING'
-    print '/ AVAILABLE'
-    print '|/ ENABLED'
-    print '||/ %-*s CONTAINER    TIMESTAMP' % (name_width, 'PROJECT')
+    print 'Running/Available/Enabled'
+    print '|^| %-*s Container    Timestamp' % (name_width, 'Project')
+    print '--- %s ------------ --------------' % ('-' * name_width)
     for (cont,site) in entries:
         print '%c%c%c %-*s %s %s' % \
             ('R' if cont.is_running() else ' ',
