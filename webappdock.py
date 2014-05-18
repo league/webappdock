@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-# dockerapp • Deploy and manage web applications as docker containers
+# webappdock.py • Deploy and manage web applications as docker containers
 # Copyright ©2014 Christopher League <league@contrapunctus.net>
 
 from contextlib import closing
@@ -246,7 +246,7 @@ def determine_port(info):
     except ValueError:
         sys.exit("Container environment %s must be an integer" % HTTP_PORT)
     except KeyError:
-        for tcp in info['NetworkSettings']['Ports']:
+        for tcp in info['NetworkSettings']['Ports'] or []:
             m = RE_PORT.match(tcp)
             if m:
                 p = int(m.group(1))
