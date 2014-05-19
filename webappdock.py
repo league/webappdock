@@ -183,21 +183,17 @@ def make_cmd():
         return id
 
 make_args = make_cmd_parser('make', notes=u'♭')
-make_args.add_argument('-l', '--label', metavar='LABEL',
-                      help='name to use for this project♭')
-make_args.add_argument('-c', '--commit', metavar='COMMIT', type=hex_arg,
-                      help='commit ID for this version♭')
-make_args.add_argument('-p', '--port', type=int, metavar='PORT',
+make_args.add_argument('-p', '--project', metavar='LABEL-COMMIT',
+                      help='name and commit ID to use for this build♭')
+make_args.add_argument('-P', '--port', type=int, metavar='PORT',
                       help='port to use for HTTP connection')
 make_args.add_argument('-e', '--ephemeral', action='store_true',
                       help='directory can be removed during clean')
 
 def label_commit_from_opts_or_cwd():
-    label, commit = label_commit_from(base_cwd())
-    label = opts.label or label
-    commit = opts.commit or commit
+    label, commit = label_commit_from(opts.project or base_cwd())
     if not commit:
-        sys.exit('You must specify --commit, unless current directory is named as LABEL-COMMIT')
+        sys.exit('You must specify --project, unless current directory is named as LABEL-COMMIT')
     announce('Using label=[%s] commit=[%s]' % (label, commit))
     return (label, commit)
 
@@ -328,7 +324,7 @@ server {
 }
 '''
 
-deploy_args = make_cmd_parser('deploy')
+deploy_args = make_cmd_parser('deploy', notes=u'♯')
 deploy_args.add_argument(
     '-c', '--container', metavar='ID', type=hex_arg,
     help='deploy this container ID'
@@ -359,7 +355,7 @@ def receive_cmd():
     dry_call('git archive "%s" | tar -x -C "%s"' % (commit, workdir),
              shell=True)
     os.chdir(workdir)
-    opts.label, opts.commit, opts.port = None, None, None
+    opts.project, opts.port = None, None
     opts.ephemeral = True
     opts.container = make_cmd()
     if not opts.container: sys.exit(1)
