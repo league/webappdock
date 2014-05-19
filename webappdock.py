@@ -222,6 +222,7 @@ def docker_run(tag):
                          call=subprocess.check_output)
     if container:
         container = container.rstrip()
+        announce(container)
     elif not opts.dry_run:
         exit(1)
     return container
@@ -369,7 +370,7 @@ def clean_cmd():
         recent = [d.container.id for d in ds[-2:]]
         for c in cs:
             if c.label == app and c.is_running() and c.id not in recent:
-                dry_call(DOCKER_STOP + [c.id])
+                dry_call(DOCKER_STOP + [c.id], call=subprocess.call)
                 c.__getstate__() # clear info cache
 
     if os.geteuid() != 0:
