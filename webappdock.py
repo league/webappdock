@@ -43,6 +43,7 @@ REF_MASTER = 'refs/heads/master'
 RE_LABEL_COMMIT = re.compile(r'^(.*?)(-([0-9a-fA-F]+))?$')
 RE_PORT = re.compile(r'^([0-9]+)/tcp')
 RE_SECRET = re.compile(r'^([_0-9a-zA-Z]+)=\?\?$')
+RE_LINKS = re.compile(r'^LINKS=(.*)$')
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 SITES_AVAILABLE = os.path.join(ETC_NGINX, 'sites-available')
 SITES_AVAIL_REL = os.path.join('..', 'sites-available')
@@ -224,6 +225,11 @@ def docker_run(tag):
             if m:
                 cmd.append('-e')
                 cmd.append(m.group(1))
+            m = RE_LINKS.match(e)
+            if m:
+                for kv in m.group(1).split(','):
+                    cmd.append('--link')
+                    cmd.append(kv)
         port_map = (random.randrange(1024, 65535),
                     opts.port or determine_port(conf) or 80)
         cmd.append('-p')
@@ -280,6 +286,8 @@ def determine_port(conf):
 
 def deploy_cmd():
     'expose a running container as a host site♯'
+    if os.geteuid() != 0:
+        sys.exit('Error: ' + footnotes[u'♯'])
     if opts.container:
         c = get_container_where(lambda c: c.id.startswith(opts.container))
     else:
@@ -287,13 +295,12 @@ def deploy_cmd():
         c = get_container_where(lambda c: c.name() == p)
     if not c.is_running():
         old_id = c.id
-        c.id = docker_run(c.image())
+        opts.port = None
+        c.id, (c.port, _) = docker_run(c.image())
         r = try_repeatedly(is_container_responding, c.id, c.port)
         if not r: sys.exit(1)
         forget_container(old_id)
         c.save()
-    if os.geteuid() != 0:
-        announce('Warning: ' + footnotes[u'♯'])
     filename = c.site_filename(datetime.now())
     avail = os.path.join(SITES_AVAILABLE, filename)
     announce('writing ' + avail)
