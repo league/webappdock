@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 # server.py • an example server
 
+import os
 import sys
 import time
 import BaseHTTPServer
@@ -9,6 +10,7 @@ import BaseHTTPServer
 HOST_NAME = ''
 PORT_NUMBER = 8000
 LOG_FILE = '/logs/access.log'
+VARS = ('FLOOP', 'BRUP', 'GORP')
 
 def log(format, *args):
     sys.stderr.write('%s: %s\n' % (time.asctime(), format % args))
@@ -25,6 +27,8 @@ class MyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         s.send_header("Content-type", "text/plain")
         s.end_headers()
         s.wfile.write("The server is up!\n")
+        for k in VARS:
+            s.wfile.write("%s is %s\n" % (k, os.environ.get(k)))
         s.wfile.write("You accessed path: %s\n" % s.path)
 
 if __name__ == '__main__':

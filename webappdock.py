@@ -41,6 +41,7 @@ NUM_TRIES = 5
 REF_MASTER = 'refs/heads/master'
 RE_LABEL_COMMIT = re.compile(r'^(.*?)(-([0-9a-fA-F]+))?$')
 RE_PORT = re.compile(r'^([0-9]+)/tcp')
+RE_SECRET = re.compile(r'^([_0-9a-zA-Z]+)=secret$')
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 SITES_AVAILABLE = os.path.join(ETC_NGINX, 'sites-available')
 SITES_AVAIL_REL = os.path.join('..', 'sites-available')
@@ -218,8 +219,19 @@ similar.'''
         sys.exit('No %s found in %s' % (DOCKERFILE, dir))
 
 def docker_run(tag):
-    container = dry_call(DOCKER_RUN_DETACH + [tag],
-                         call=subprocess.check_output)
+    secrets = []
+    info = docker_inspect(tag)
+    conf = info.get('Config') or info.get('config')
+    for e in conf['Env']:
+        m = RE_SECRET.match(e)
+        if m:
+            secrets.append(m.group(1))
+    cmd = DOCKER_RUN_DETACH
+    for s in secrets:
+        cmd.append('-e')
+        cmd.append(s)
+    cmd.append(tag)
+    container = dry_call(cmd, call=subprocess.check_output)
     if container:
         container = container.rstrip()
         announce(container)
