@@ -41,9 +41,9 @@ HTTP_PORT = 'HTTP_PORT'
 NUM_TRIES = 5
 REF_MASTER = 'refs/heads/master'
 RE_LABEL_COMMIT = re.compile(r'^(.*?)(-([0-9a-fA-F]+))?$')
+RE_LINKS = re.compile(r'^LINKS=(.*)$')
 RE_PORT = re.compile(r'^([0-9]+)/tcp')
 RE_SECRET = re.compile(r'^([_0-9a-zA-Z]+)=\?\?$')
-RE_LINKS = re.compile(r'^LINKS=(.*)$')
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 SITES_AVAILABLE = os.path.join(ETC_NGINX, 'sites-available')
 SITES_AVAIL_REL = os.path.join('..', 'sites-available')
@@ -416,7 +416,7 @@ def clean_cmd():
     print '• Removing stopped unavailable containers...'
     for c in cs:
         if not c.is_running() and not c.is_available():
-            dry_call(DOCKER_RM + [c.id])
+            dry_call(DOCKER_RM + [c.id], call=subprocess.call)
             dry_guard('forget '+c.id, forget_container, c.id)
             if c.ephemeral:
                 dry_guard('rm -r '+c.dir, shutil.rmtree, c.dir)
@@ -580,7 +580,10 @@ class Container(object):
 
     def is_running(self):
         self.ensure_info_cache()
-        return self._info_cache['State']['Running']
+        if self._info_cache:
+            return self._info_cache['State']['Running']
+        else:
+            return False
 
     def image(self):
         self.ensure_info_cache()
@@ -685,8 +688,11 @@ def try_repeatedly(func, *args, **kwargs):
     print '• giving up, sorry'
 
 def docker_inspect(container_id):
-    buf = subprocess.check_output(DOCKER_INSPECT + [container_id])
-    return json.loads(buf)[0]
+    try:
+        buf = subprocess.check_output(DOCKER_INSPECT + [container_id])
+        return json.loads(buf)[0]
+    except subprocess.CalledProcessError:
+        pass
 
 def is_container_responding(container_id, port):
     'Check for HTTP response from container'
