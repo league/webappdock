@@ -42,7 +42,7 @@ NUM_TRIES = 5
 REF_MASTER = 'refs/heads/master'
 RE_LABEL_COMMIT = re.compile(r'^(.*?)(-([0-9a-fA-F]+))?$')
 RE_PORT = re.compile(r'^([0-9]+)/tcp')
-RE_SECRET = re.compile(r'^([_0-9a-zA-Z]+)=secret$')
+RE_SECRET = re.compile(r'^([_0-9a-zA-Z]+)=\?\?$')
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 SITES_AVAILABLE = os.path.join(ETC_NGINX, 'sites-available')
 SITES_AVAIL_REL = os.path.join('..', 'sites-available')
