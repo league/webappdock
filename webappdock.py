@@ -12,6 +12,7 @@ import httplib
 import json
 import math
 import os
+import random
 import re
 import shelve
 import shutil
@@ -170,14 +171,13 @@ def make_cmd():
     label, commit = label_commit_from_opts_or_cwd()
     tag = '%s:%s' % (label,commit)
     docker_build(tag)
-    id = docker_run(tag)
+    id, port_map = docker_run(tag)
     if opts.dry_run: return
     info = docker_inspect(id)
-    port = opts.port or determine_port(info) or 80
-    announce('Using port %d for HTTP' % port)
-    c = Container(id, label, commit, port)
+    announce('Using port %d→%d for HTTP' % port_map)
+    c = Container(id, label, commit, port_map[0])
     c.save()
-    r = try_repeatedly(is_container_responding, id, port)
+    r = try_repeatedly(is_container_responding, id, port_map[0])
     if r:
         print id, info['Name']
         return id
@@ -219,17 +219,19 @@ similar.'''
         sys.exit('No %s found in %s' % (DOCKERFILE, dir))
 
 def docker_run(tag):
-    secrets = []
-    info = docker_inspect(tag)
-    conf = info.get('Config') or info.get('config')
-    for e in conf['Env']:
-        m = RE_SECRET.match(e)
-        if m:
-            secrets.append(m.group(1))
     cmd = DOCKER_RUN_DETACH
-    for s in secrets:
-        cmd.append('-e')
-        cmd.append(s)
+    port_map = None
+    if not opts.dry_run:
+        conf = docker_config(docker_inspect(tag))
+        for e in conf['Env']:
+            m = RE_SECRET.match(e)
+            if m:
+                cmd.append('-e')
+                cmd.append(m.group(1))
+        port_map = (random.randrange(1024, 65535),
+                    opts.port or determine_port(conf) or 80)
+        cmd.append('-p')
+        cmd.append('%d:%d' % port_map)
     cmd.append(tag)
     container = dry_call(cmd, call=subprocess.check_output)
     if container:
@@ -237,29 +239,40 @@ def docker_run(tag):
         announce(container)
     elif not opts.dry_run:
         exit(1)
-    return container
+    return container, port_map
 
-def determine_port(info):
+def docker_config(info):
+    '''Return the `Config` or `config` value.
+    Images seem to use `config` and containers `Config`.
+
+    >>> docker_config({'a': 4, 'Config': 97})
+    97
+    >>> docker_config({'a': 4, 'config': 98})
+    98
+    >>> docker_config({'a': 4, 'configure': 99})
+    '''
+    return info.get('Config') or info.get('config')
+
+def determine_port(conf):
     '''Determine HTTP port from container environment or exposed port list.
 
-    >>> i = {'Config':{'Env':['HTTP_PORT=9134']},
-    ...      'NetworkSettings':{'Ports':{'22/tcp':True,'9415/tcp':True}}}
+    >>> i = {'Env':['HTTP_PORT=9134'],
+    ...      'ExposedPorts':{'22/tcp':True,'9415/tcp':True}}
     >>> determine_port(i)
     9134
-    >>> i = {'Config':{'Env':['HTTP_PORTS=9134']},
-    ...      'NetworkSettings':{'Ports':{'22/tcp':True,'9415/tcp':True}}}
+    >>> i = {'Env':['HTTP_PORTS=9134'],
+    ...      'ExposedPorts':{'22/tcp':True,'9415/tcp':True}}
     >>> determine_port(i)
     9415
-    >>> i = {'Config':{'Env':['SECRET=frobnozz']},
-    ...      'NetworkSettings':{'Ports':{'22/tcp':True}}}
+    >>> i = {'Env':['SECRET=frobnozz'], 'ExposedPorts':{'22/tcp':True}}
     >>> determine_port(i)
     '''
     try:
-        return int(env_list_lookup(info['Config']['Env'], HTTP_PORT))
+        return int(env_list_lookup(conf['Env'], HTTP_PORT))
     except ValueError:
         sys.exit("Container environment %s must be an integer" % HTTP_PORT)
     except KeyError:
-        for tcp in info['NetworkSettings']['Ports'] or []:
+        for tcp in conf['ExposedPorts'] or []:
             m = RE_PORT.match(tcp)
             if m:
                 p = int(m.group(1))
@@ -290,7 +303,7 @@ def deploy_cmd():
     announce('writing ' + avail)
     if not opts.dry_run:
         with open(avail, 'w') as outfile:
-            url = 'http://%s:%d' % (c.ip_address(), c.port)
+            url = 'http://localhost:%d' % c.port
             outfile.write(NGINX_PROXY % url)
     avail_rel = os.path.join(SITES_AVAIL_REL, filename)
     enabled = os.path.join(SITES_ENABLED, filename)
@@ -566,10 +579,6 @@ class Container(object):
         self.ensure_info_cache()
         return self._info_cache['State']['Running']
 
-    def ip_address(self):
-        self.ensure_info_cache()
-        return self._info_cache['NetworkSettings']['IPAddress']
-
     def image(self):
         self.ensure_info_cache()
         return self._info_cache['Image']
@@ -681,9 +690,7 @@ def is_container_responding(container_id, port):
     info = docker_inspect(container_id)
     if not info['State']['Running']:
         sys.exit("Container no longer running")
-    ip = info['NetworkSettings']['IPAddress']
-    if ip:
-        return ensure_http_ok(ip, port, HTTP_PATH)
+    return ensure_http_ok('localhost', port, HTTP_PATH)
 
 def ensure_http_ok(host, port, path):
     '''Ensure that an HTTP GET to HOST:PORT using PATH succeeds with 200 OK.

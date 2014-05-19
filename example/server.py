@@ -26,7 +26,7 @@ class MyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         s.send_response(200)
         s.send_header("Content-type", "text/plain")
         s.end_headers()
-        s.wfile.write("The server is up!\n")
+        s.wfile.write("The server is now up!\n")
         for k in VARS:
             s.wfile.write("%s is %s\n" % (k, os.environ.get(k)))
         s.wfile.write("You accessed path: %s\n" % s.path)
