@@ -730,7 +730,10 @@ def ensure_http_ok(host, port, path):
     h.request('GET', path)
     r = h.getresponse()
     announce(' → %s %s' % (r.status, r.reason))
-    return r.status == httplib.OK
+    if r.status == httplib.BAD_GATEWAY:
+        pass # might benefit from more time
+    else:
+        return r.status == httplib.OK
 
 def base_cwd():
     '''Return base name of current directory.
